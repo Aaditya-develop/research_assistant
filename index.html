@@ -311,6 +311,14 @@
       color: #92400e;
     }
 
+    .grounding-note {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid #f3e3b5;
+      font-size: 12px;
+      color: #92400e;
+    }
+
     /* Typing indicator */
     .typing .bubble {
       display: flex;
@@ -401,7 +409,6 @@
   <div class="spacer"></div>
   <select id="companySelect">
     <option value="Apple 2024">Apple — FY 2024</option>
-    <option value="Apple 2023">Apple — FY 2023</option>
   </select>
 </header>
 
@@ -442,6 +449,7 @@
   const input       = document.getElementById('queryInput');
   const sendBtn     = document.getElementById('sendBtn');
   const company     = document.getElementById('companySelect');
+  const chatHistory = [];  // [{role, content}] sent with each question so follow-ups work
 
   // Auto-grow textarea
   input.addEventListener('input', () => {
@@ -519,7 +527,12 @@
       details.className = 'source-card';
 
       const summary = document.createElement('summary');
-      summary.innerHTML = `<span class="page-tag">p.${page}</span><span>${label}</span>`;
+      const pageTag = document.createElement('span');
+      pageTag.className = 'page-tag';
+      pageTag.textContent = `p.${page}`;
+      const labelEl = document.createElement('span');
+      labelEl.textContent = label;
+      summary.append(pageTag, labelEl);
 
       const body = document.createElement('div');
       body.className = 'body';
@@ -543,19 +556,35 @@
     showTyping();
 
     try {
-      const res = await fetch('http://127.0.0.1:8000/ask', {
+      // Relative URL so this works both locally and when deployed
+      const res = await fetch('/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: q, company: company.value })
+        body: JSON.stringify({ question: q, company: company.value, chat_history: chatHistory.slice(-6) })
       });
 
-      const data = await res.json();
+      let data = {};
+      try { data = await res.json(); } catch (_) {}
       removeTyping();
-      appendMsg('ai', data.answer);
-      renderSources(data.sources || []);
+
+      if (!res.ok) {
+        const msg = appendMsg('ai', data.answer || `The server returned an error (${res.status}). Please try again.`);
+        msg.querySelector('.bubble').classList.add('warning');
+      } else {
+        const msg = appendMsg('ai', data.answer);
+        if (data.grounded === false) {
+          const note = document.createElement('div');
+          note.className = 'grounding-note';
+          note.textContent = "Couldn't fully verify this answer against the filing. Check the cited sources.";
+          msg.querySelector('.bubble').appendChild(note);
+        }
+        renderSources(data.sources || []);
+        chatHistory.push({ role: 'user', content: q }, { role: 'assistant', content: data.answer });
+      }
     } catch (err) {
       removeTyping();
-      appendMsg('ai', 'Could not reach the server. Make sure the API is running on port 8000.');
+      const msg = appendMsg('ai', 'Could not reach the server. Make sure the API is running.');
+      msg.querySelector('.bubble').classList.add('warning');
     }
 
     sendBtn.disabled = false;

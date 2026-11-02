@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+MAX_ATTEMPTS = 2
+
 class WriterAgent(TypedDict):
     question: str
     documents: List[Document]
@@ -15,76 +17,105 @@ class WriterAgent(TypedDict):
     answer: str
     hallucinate_count: int
     rewritten: str
-    
-llm = ChatOpenAI(model = "gpt-4o", temperature = 0)
+    search_failed: bool
+    grounded: bool
+
+llm = ChatOpenAI(model = "gpt-4o", temperature = 0, timeout = 60, max_retries = 3)
+
+
+def format_context(documents: List[Document]) -> str:
+    #Separate chunks and label their page so the model doesn't blend numbers across chunks
+    parts = []
+    for i, doc in enumerate(documents):
+        parts.append(f"[Chunk {i+1} | page {doc.metadata.get('page', '?')}]\n{doc.page_content}")
+    return "\n\n---\n\n".join(parts)
+
+
+def format_history(chat_history: List) -> str:
+    lines = []
+    for turn in chat_history:
+        lines.append(f"{turn['role']}: {turn['content']}")
+    return "\n".join(lines) if lines else "(none)"
+
 
 def generate(state: WriterAgent):
     question = state["question"]
     is_retrieval = state["is_retrieval"].lower()
-    #print("DEBUG generate is_retrieval:", repr(is_retrieval))
     tool_result = str(state["tool_result"])
-    #print("DEBUG tool_result in writer:", tool_result[:300])
-    chat_history = state["chat_history"]
-    context = ""
-    for doc in state["documents"]:
-        context = context + doc.page_content
-    
+    history = format_history(state["chat_history"])
+    context = format_context(state["documents"])
 
-    
-    if "search" in is_retrieval:
+    if "search" in is_retrieval and state.get("search_failed"):
+        prompt = f"""Live web search is unavailable right now. Answer from your own knowledge,
+        and start your answer by saying it may be out of date because live search failed.
+        Chat history: {history}
+        Question: {question}
+        Answer: """
+    elif "search" in is_retrieval:
         prompt = f"""Generate a response using this content from the web as your information source.
-        question: {question}
-        information: {tool_result}
+        Chat history: {history}
+        Question: {question}
+        Information: {tool_result}
         Answer: """
     elif "retrieve" in is_retrieval:
-        prompt = f"""Generate a response using the document content below.
+        prompt = f"""Generate a response using the document content below, taken from Apple's fiscal 2024 Form 10-K.
         The documents may contain raw table data — do your best to interpret it.
         If you can see numbers that likely answer the question, use them.
         Only say "I don't know" if the documents contain absolutely nothing related.
 
+        Chat history: {history}
         Question: {question}
         Documents: {context}
         Answer:"""
     else:
         prompt = f"""Generate a response using your knowledge and chat history.
-        question: {question}
-        chat history: {chat_history}
+        Chat history: {history}
+        Question: {question}
         Answer: """
-        
+
+    #On a retry, tell the model why its last answer was rejected, otherwise temperature 0 just repeats it
+    if state.get("hallucinate_count", 0) > 0 and state.get("answer"):
+        prompt += f"""
+
+        Your previous answer was rejected because it was not supported by the documents:
+        {state["answer"]}
+        Write a new answer that only states facts and numbers that appear in the documents.
+        If the documents don't contain the answer, say so."""
+
     response = llm.invoke(prompt)
     return {**state, "answer": response.content}
+
 
 def hallucination_check(state: WriterAgent) -> WriterAgent:
     answer = state["answer"]
     documents = state["documents"]
     hallucination_count = state["hallucinate_count"]
     is_retrieval = state["is_retrieval"].lower()
-    context=""
-    for doc in documents:
-        context = context + doc.page_content
-    if not context or "retrieve" not in is_retrieval:
-        return{**state, "hallucinate_count": 0}
+    context = format_context(documents)
+    if not documents or "retrieve" not in is_retrieval:
+        return{**state, "hallucinate_count": 0, "grounded": True}
+
+    prompt = f""" Does this answer accurately reflect whatever the documents gave?
+    answer: {answer}
+    documents: {context}
+    Answer only with YES or NO
+    """
+    response = llm.invoke(prompt)
+
+    if response.content.strip().lower().startswith("yes"):
+        #Passed: reset the count so should_hallucinate ends the loop
+        return{**state, "hallucinate_count": 0, "grounded": True}
     else:
-        prompt = f""" Does this answer accuratley reflect whatever the documents gave?
-        answer: {answer}
-        documents: {context}
-        Answer only with YES or NO
-        """
-        response = llm.invoke(prompt)
-        
-    if "yes" in response.content.lower():
-        return{**state, "hallucinate_count": hallucination_count}
-    else:
-        return{**state, "hallucinate_count": hallucination_count + 1}
-    
+        return{**state, "hallucinate_count": hallucination_count + 1, "grounded": False}
+
 def should_hallucinate(state: WriterAgent) -> str:
     if state["hallucinate_count"] == 0:
         return "pass"
-    elif state["hallucinate_count"] < 2:
+    elif state["hallucinate_count"] < MAX_ATTEMPTS:
         return "regenerate"
     else:
         return "pass"
-    
+
 workflow = StateGraph(WriterAgent)
 workflow.set_entry_point("generate")
 workflow.add_node("generate", generate)

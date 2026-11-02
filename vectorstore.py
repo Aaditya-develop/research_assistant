@@ -78,13 +78,14 @@ class VectorStore:
             print(f"Error loading documents {e}")
             return []
     
-    def search_with_filter(self, question: str, k: int = 4) -> list[Document]:
+    def search_with_filter(self, question: str, where: dict, k: int = 4) -> list[Document]:
+        #where is a ChromaDB metadata filter, e.g. {"company": "apple"}
         try:
             question_embed = self.embeddings.embed_query(question)
             results = self.collection.query(
                 query_embeddings = [question_embed],
                 n_results = k,
-                where = filter
+                where = where
             )
             docs = []
             for text, metadata in zip(results["documents"][0], results["metadatas"][0]):
@@ -92,6 +93,7 @@ class VectorStore:
             return docs
         except Exception as e:
             print(f" Error searching documents {e}")
+            return []
     def count(self) -> int:
         try:
             return self.collection.count()

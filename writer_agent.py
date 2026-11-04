@@ -13,11 +13,8 @@ class WriterAgent(TypedDict):
     documents: List[Document]
     is_retrieval: str
     chat_history: List
-    tool_result: str
     answer: str
     hallucinate_count: int
-    rewritten: str
-    search_failed: bool
     grounded: bool
 
 llm = ChatOpenAI(model = "gpt-4o", temperature = 0, timeout = 60, max_retries = 3)
@@ -41,23 +38,10 @@ def format_history(chat_history: List) -> str:
 def generate(state: WriterAgent):
     question = state["question"]
     is_retrieval = state["is_retrieval"].lower()
-    tool_result = str(state["tool_result"])
     history = format_history(state["chat_history"])
     context = format_context(state["documents"])
 
-    if "search" in is_retrieval and state.get("search_failed"):
-        prompt = f"""Live web search is unavailable right now. Answer from your own knowledge,
-        and start your answer by saying it may be out of date because live search failed.
-        Chat history: {history}
-        Question: {question}
-        Answer: """
-    elif "search" in is_retrieval:
-        prompt = f"""Generate a response using this content from the web as your information source.
-        Chat history: {history}
-        Question: {question}
-        Information: {tool_result}
-        Answer: """
-    elif "retrieve" in is_retrieval:
+    if "retrieve" in is_retrieval:
         prompt = f"""Generate a response using the document content below, taken from Apple's fiscal 2024 Form 10-K.
         The documents may contain raw table data — do your best to interpret it.
         If you can see numbers that likely answer the question, use them.

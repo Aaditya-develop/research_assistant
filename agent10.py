@@ -5,7 +5,6 @@ from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 from retriever_agent import retriever_app
-from search_agent import search_app
 from writer_agent import writer_app
 from langfuse.langchain import CallbackHandler
 
@@ -24,17 +23,15 @@ class OrchestratorState(TypedDict):
     question: str
     standalone_question: str
     documents: List[Document]
-    tool_result: str
     is_retrieval: str
     chat_history: List
     answer: str
     hallucinate_count: int
-    search_failed: bool
     grounded: bool
 
 
 class RouteDecision(BaseModel):
-    route: Literal["retrieve", "search", "generate", "out_of_scope"]
+    route: Literal["retrieve", "generate", "out_of_scope"]
     standalone_question: str = Field(
         description="The question rewritten to make sense without the chat history. Same as the question if it already does."
     )
@@ -54,7 +51,6 @@ def decide(state: OrchestratorState) -> OrchestratorState:
     - retrieve: Apple's financials, revenue, earnings, buybacks, dividends, risk factors,
       business operations, or anything that could be found in Apple's 10-K, including
       fiscal 2023 and 2022 comparisons.
-    - search: needs truly live information not in any filing (e.g. today's Apple stock price, recent Apple news).
     - generate: greetings, thanks, questions about the conversation itself, or general finance and
       accounting concepts (e.g. "what is free cash flow?").
     - out_of_scope: anything unrelated to Apple, companies, finance, or investing (recipes, sports,
@@ -81,16 +77,7 @@ def run_retriever(state: OrchestratorState) -> OrchestratorState:
         "question": state["standalone_question"],
         "documents": []
     })
-    return{**state,
-           "documents": result["documents"],
-           }
-
-def run_search(state: OrchestratorState) -> OrchestratorState:
-    result = search_app.invoke({
-        "question": state["standalone_question"],
-        "tool_result": state["tool_result"]
-    })
-    return{**state, "tool_result": result["tool_result"], "search_failed": result["search_failed"]}
+    return{**state, "documents": result["documents"]}
 
 def run_writer(state: OrchestratorState) -> OrchestratorState:
     result = writer_app.invoke({
@@ -98,10 +85,8 @@ def run_writer(state: OrchestratorState) -> OrchestratorState:
         "documents": state["documents"],
         "is_retrieval": state["is_retrieval"],
         "chat_history": state["chat_history"],
-        "tool_result": state["tool_result"],
         "answer": state["answer"],
         "hallucinate_count": state["hallucinate_count"],
-        "search_failed": state.get("search_failed", False),
     })
     return {**state,
             "answer": result["answer"],
@@ -119,20 +104,17 @@ workflow = StateGraph(OrchestratorState)
 workflow.set_entry_point("decide")
 workflow.add_node("decide", decide)
 workflow.add_node("run_retriever", run_retriever)
-workflow.add_node("run_search", run_search)
 workflow.add_node("run_writer", run_writer)
 workflow.add_node("refuse", refuse)
 workflow.add_conditional_edges(
     "decide",
     should_route,
     {
-        "search": "run_search",
         "retrieve": "run_retriever",
         "generate": "run_writer",
         "out_of_scope": "refuse",
     }
 )
-workflow.add_edge("run_search", "run_writer")
 workflow.add_edge("run_retriever", "run_writer")
 workflow.add_edge("run_writer", END)
 workflow.add_edge("refuse", END)
@@ -145,12 +127,10 @@ def initial_state(question: str, chat_history: List) -> OrchestratorState:
         "question": question,
         "standalone_question": question,
         "documents": [],
-        "tool_result": "",
         "is_retrieval": "",
         "chat_history": chat_history,
         "answer": "",
         "hallucinate_count": 0,
-        "search_failed": False,
         "grounded": True,
     }
 
